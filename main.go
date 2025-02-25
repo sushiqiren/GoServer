@@ -25,7 +25,11 @@ type apiConfig struct {
 }
 
 type Chirp struct {
-	Body string `json:"body"`
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
 }
 
 type User struct {
@@ -93,22 +97,20 @@ func (a *apiConfig) metricsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(html))
 }
 
-func (a *apiConfig) validateChirpHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
+func (a *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Body   string    `json:"body"`
+		UserID uuid.UUID `json:"user_id"`
 	}
-
-	var chirp Chirp
-	err := json.NewDecoder(r.Body).Decode(&chirp)
+	err := json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Something went wrong"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
 		return
 	}
 
-	if len(chirp.Body) > 140 {
+	if len(req.Body) > 140 {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Chirp is too long"})
@@ -117,15 +119,108 @@ func (a *apiConfig) validateChirpHandler(w http.ResponseWriter, r *http.Request)
 
 	// Replace profane words with ****
 	profaneWords := []string{"kerfuffle", "sharbert", "fornax"}
-	cleanedBody := chirp.Body
+	cleanedBody := req.Body
 	for _, word := range profaneWords {
 		cleanedBody = strings.ReplaceAll(cleanedBody, word, "****")
 		cleanedBody = strings.ReplaceAll(cleanedBody, strings.Title(word), "****")
 	}
 
+	dbChirp, err := a.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{
+		Body:   cleanedBody,
+		UserID: req.UserID,
+	})
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create chirp"})
+		return
+	}
+
+	chirp := Chirp{
+		ID:        dbChirp.ID,
+		CreatedAt: dbChirp.CreatedAt,
+		UpdatedAt: dbChirp.UpdatedAt,
+		Body:      dbChirp.Body,
+		UserID:    dbChirp.UserID,
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(chirp)
+}
+
+func (a *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
+	chirps, err := a.dbQueries.GetAllChirps(r.Context())
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to retrieve chirps"})
+		return
+	}
+
+	var response []Chirp
+	for _, dbChirp := range chirps {
+		chirp := Chirp{
+			ID:        dbChirp.ID,
+			CreatedAt: dbChirp.CreatedAt,
+			UpdatedAt: dbChirp.UpdatedAt,
+			Body:      dbChirp.Body,
+			UserID:    dbChirp.UserID,
+		}
+		response = append(response, chirp)
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"cleaned_body": cleanedBody})
+	json.NewEncoder(w).Encode(response)
+}
+
+func (a *apiConfig) chirpsHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		a.createChirpHandler(w, r)
+	case http.MethodGet:
+		a.getChirpsHandler(w, r)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *apiConfig) getChirpByIDHandler(w http.ResponseWriter, r *http.Request) {
+	chirpID := strings.TrimPrefix(r.URL.Path, "/api/chirps/")
+	id, err := uuid.Parse(chirpID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid chirp ID"})
+		return
+	}
+
+	dbChirp, err := a.dbQueries.GetChirpByID(r.Context(), id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Chirp not found"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to retrieve chirp"})
+		return
+	}
+
+	chirp := Chirp{
+		ID:        dbChirp.ID,
+		CreatedAt: dbChirp.CreatedAt,
+		UpdatedAt: dbChirp.UpdatedAt,
+		Body:      dbChirp.Body,
+		UserID:    dbChirp.UserID,
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(chirp)
 }
 
 func (a *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -220,8 +315,11 @@ func main() {
 	// Add the metrics endpoint
 	mux.HandleFunc("/admin/metrics", apiCfg.metricsHandler)
 
-	// Add the validate chirp endpoint
-	mux.HandleFunc("/api/validate_chirp", apiCfg.validateChirpHandler)
+	// Add the chirps endpoint
+	mux.HandleFunc("/api/chirps", apiCfg.chirpsHandler)
+
+	// Add the get chirp by ID endpoint
+	mux.HandleFunc("/api/chirps/", apiCfg.getChirpByIDHandler)
 
 	// Add the create user endpoint
 	mux.HandleFunc("/api/users", apiCfg.createUserHandler)
