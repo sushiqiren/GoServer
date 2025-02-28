@@ -205,6 +205,8 @@ func (a *apiConfig) chirpsHandler(w http.ResponseWriter, r *http.Request) {
 		a.createChirpHandler(w, r)
 	case http.MethodGet:
 		a.getChirpsHandler(w, r)
+	case http.MethodDelete:
+		a.deleteChirpHandler(w, r)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
@@ -245,6 +247,75 @@ func (a *apiConfig) getChirpByIDHandler(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(chirp)
+}
+
+func (a *apiConfig) deleteChirpHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract the bearer token from the Authorization header
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Unauthorized"})
+		return
+	}
+
+	// Validate the JWT
+	userID, err := auth.ValidateJWT(tokenString, a.jwtSecret)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Unauthorized"})
+		return
+	}
+
+	// Extract the chirp ID from the URL
+	chirpID := strings.TrimPrefix(r.URL.Path, "/api/chirps/")
+	id, err := uuid.Parse(chirpID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid chirp ID"})
+		return
+	}
+
+	// Retrieve the chirp from the database
+	dbChirp, err := a.dbQueries.GetChirpByID(r.Context(), id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Chirp not found"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to retrieve chirp"})
+		return
+	}
+
+	// Check if the user is the author of the chirp
+	if dbChirp.UserID != userID {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Forbidden"})
+		return
+	}
+
+	// Delete the chirp from the database
+	err = a.dbQueries.DeleteChirp(r.Context(), id)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to delete chirp"})
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent) // 204 No Content
 }
 
 func (a *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -464,6 +535,86 @@ func (a *apiConfig) revokeHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent) // 204 No Content
 }
 
+func (a *apiConfig) updateUserHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract the bearer token from the Authorization header
+	tokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Unauthorized"})
+		return
+	}
+
+	// Validate the JWT
+	userID, err := auth.ValidateJWT(tokenString, a.jwtSecret)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Unauthorized"})
+		return
+	}
+
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	err = json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
+		return
+	}
+
+	// Hash the new password
+	hashedPassword, err := auth.HashPassword(req.Password)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to hash password"})
+		return
+	}
+
+	// Update the user's email and hashed password in the database
+	err = a.dbQueries.UpdateUser(r.Context(), database.UpdateUserParams{
+		ID:             userID,
+		Email:          req.Email,
+		HashedPassword: hashedPassword,
+		UpdatedAt:      time.Now(),
+	})
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to update user"})
+		return
+	}
+
+	// Retrieve the updated user from the database
+	dbUser, err := a.dbQueries.GetUserByID(r.Context(), userID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to retrieve updated user"})
+		return
+	}
+
+	user := User{
+		ID:        dbUser.ID,
+		CreatedAt: dbUser.CreatedAt,
+		UpdatedAt: dbUser.UpdatedAt,
+		Email:     dbUser.Email,
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(user)
+}
+
 func main() {
 	// Load environment variables from .env file
 	err := godotenv.Load()
@@ -530,10 +681,28 @@ func main() {
 	mux.HandleFunc("/api/chirps", apiCfg.chirpsHandler)
 
 	// Add the get chirp by ID endpoint
-	mux.HandleFunc("/api/chirps/", apiCfg.getChirpByIDHandler)
+	// Add the delete chirp endpoint
+	// Add the chirps endpoint
+	mux.HandleFunc("/api/chirps/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			apiCfg.getChirpByIDHandler(w, r)
+		} else if r.Method == http.MethodDelete {
+			apiCfg.deleteChirpHandler(w, r)
+		} else {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
 
 	// Add the create user endpoint
-	mux.HandleFunc("/api/users", apiCfg.createUserHandler)
+	mux.HandleFunc("/api/users", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			apiCfg.createUserHandler(w, r)
+		} else if r.Method == http.MethodPut {
+			apiCfg.updateUserHandler(w, r)
+		} else {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
 
 	// Add the login endpoint
 	mux.HandleFunc("/api/login", apiCfg.loginHandler)
@@ -543,6 +712,9 @@ func main() {
 
 	// Add the revoke endpoint
 	mux.HandleFunc("/api/revoke", apiCfg.revokeHandler)
+
+	
+	
 
 	// Use http.FileServer as the handler for the /app/ path
 	fileServer := http.FileServer(http.Dir("."))
