@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"sort"
+
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -176,12 +178,46 @@ func (a *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
-	chirps, err := a.dbQueries.GetAllChirps(r.Context())
+	authorID := r.URL.Query().Get("author_id")
+	sortOrder := r.URL.Query().Get("sort")
+
+	var chirps []database.Chirp
+	var err error
+
+	if authorID != "" {
+		// Parse the author_id to UUID
+		var authorUUID uuid.UUID
+		authorUUID, err = uuid.Parse(authorID)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Invalid author_id"})
+			return
+		}
+
+		// Get chirps by author ID
+		chirps, err = a.dbQueries.GetChirpsByAuthorID(r.Context(), authorUUID)
+	} else {
+		// Get all chirps
+		chirps, err = a.dbQueries.GetAllChirps(r.Context())
+	}
+
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to retrieve chirps"})
 		return
+	}
+
+	// Sort chirps based on the sortOrder parameter
+	if sortOrder == "desc" {
+		sort.Slice(chirps, func(i, j int) bool {
+			return chirps[i].CreatedAt.After(chirps[j].CreatedAt)
+		})
+	} else {
+		sort.Slice(chirps, func(i, j int) bool {
+			return chirps[i].CreatedAt.Before(chirps[j].CreatedAt)
+		})
 	}
 
 	var response []Chirp
